@@ -1,0 +1,7 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+use Chart::Clicker::SQL::REPL;
+
+Chart::Clicker::SQL::REPL->new->run;
