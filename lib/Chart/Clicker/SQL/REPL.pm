@@ -93,29 +93,6 @@ has renderer_class => (
     default => 'Chart::Clicker::Renderer::Line',
 );
 
-sub dsn ($self, $dsn) {
-    $self->sql(Chart::Clicker::SQL->new(dsn => $dsn));
-}
-
-sub select ($self, $query) {
-    $query = "select $query";
-    $self->last_query($query);
-}
-
-sub timechart ($self, $args) {
-    $self->domain_axis_class(
-        $args eq 'on'
-            ? "Chart::Clicker::Axis::DateTime"
-            : "Chart::Clicker::Axis"
-    )
-}
-
-for my $renderer (qw(Line StackedLine Bar StackedBar Area StackedArea Point)) {
-    __PACKAGE__->meta->add_method(lc($renderer) => sub ($self, $args) {
-        $self->renderer_class("Chart::Clicker::Renderer::$renderer");
-    })
-}
-
 sub _draw ($self) {
     if (!$self->initialized) {
         warn "not initialized";
@@ -179,13 +156,15 @@ sub _attempt_completion ($self, $text, $line, $start, $end) {
 
 sub _get_completions ($self, $text, $initial_word) {
     if ($initial_word) {
-        my $completion_method = "_complete_$initial_word";
+        my $completion_method = "_complete_\L$initial_word";
         return unless $self->can($completion_method);
         return $self->$completion_method($text);
     }
     else {
-        my @keywords = grep {
-            !/^_/
+        my @keywords = map {
+            s/^_command_//r
+        } grep {
+            /^_command_/
         } grep {
             !Moose::Object->can($_)
         } $self->meta->get_all_method_names;
@@ -194,38 +173,14 @@ sub _get_completions ($self, $text, $initial_word) {
     }
 }
 
-sub _complete_select ($self, $text) {
-    $self->_keyword_complete(
-        $text,
-        [
-            $self->_sql_keywords,
-            $self->_sql_functions,
-            $self->_sql_tables,
-            $self->_sql_columns,
-        ]
-    )
-}
-
-sub _complete_timechart ($self, $text) {
-    $self->_keyword_complete($text, [ qw(on off) ])
-}
-
-for my $method (qw(width height)) {
-    __PACKAGE__->meta->add_method("_complete_$method" => sub ($self, $text) {
-        $self->_default_complete($text, $method)
-    })
-}
-
-sub _default_complete ($self, $text, $method) {
-    $self->_keyword_complete($text, [ $self->$method ])
-}
-
 sub _keyword_complete ($self, $text, $keywords) {
     my ($prefix) = $text =~ /.*\b(\w+)$/;
     $prefix ||= '';
     my $capital = $prefix eq uc($prefix);
+    my $empty = length($prefix) == 0;
     return map {
-        $prefix . substr($capital ? $_ : lc, length($prefix))
+        my $suffix = $empty ? $_ : ($capital ? uc : lc);
+        $prefix . substr($suffix, length($prefix))
     } grep {
         /^\Q$prefix/i
     } $keywords->@*;
@@ -304,6 +259,75 @@ sub _sql_columns ($self) {
     return List::Util::uniq map { $_->[3] } $rows->@*;
 }
 
+sub command ($name, $body) {
+    __PACKAGE__->meta->add_method("_command_$name", sub ($self, $args) {
+        if ($body) {
+            $args =~ s/^\s*|\s*$//g;
+            $body->($self, $args);
+            return;
+        }
+        else {
+            return 1;
+        }
+    });
+}
+
+sub complete ($name, $body) {
+    __PACKAGE__->meta->add_method("_complete_$name", sub ($self, $text) {
+        $body->($self, $text);
+    });
+}
+
+command dsn => sub ($self, $dsn) {
+    $self->sql(Chart::Clicker::SQL->new(dsn => $dsn));
+};
+
+for my $sql_keyword (qw(select with)) {
+    command $sql_keyword => sub ($self, $query) {
+        $self->last_query("$sql_keyword $query");
+    };
+    complete $sql_keyword => sub ($self, $text) {
+        $self->_keyword_complete(
+            $text,
+            [
+                $self->_sql_keywords,
+                $self->_sql_functions,
+                $self->_sql_tables,
+                $self->_sql_columns,
+            ]
+        )
+    };
+}
+
+for my $method (qw(width height)) {
+    command $method => sub ($self, $value) {
+        $self->$method($value);
+    };
+    complete $method => sub ($self, $text) {
+        $self->_keyword_complete($text, [ $self->$method ])
+    };
+}
+
+command timechart => sub ($self, $args) {
+    $self->domain_axis_class(
+        $args eq 'on'
+            ? "Chart::Clicker::Axis::DateTime"
+            : "Chart::Clicker::Axis"
+    )
+};
+complete timechart => sub ($self, $text) {
+    $self->_keyword_complete($text, [ 'off', 'on' ]);
+};
+
+for my $renderer (qw(Line StackedLine Bar StackedBar Area StackedArea Point)) {
+    command lc($renderer) => sub ($self, $args) {
+        $self->renderer_class("Chart::Clicker::Renderer::$renderer");
+    };
+}
+
+command exit => undef;
+command quit => undef;
+
 sub run ($self) {
     while (1) {
         my $prompt = "> ";
@@ -313,15 +337,17 @@ sub run ($self) {
         if (defined(my $input = $self->rl->readline($prompt))) {
             next unless length($input);
             chomp($input);
-            last if $input eq 'exit';
             my ($command, $args) = split(' ', $input, 2);
+            my $exit;
             try {
-                $self->$command($args);
+                my $method = "_command_\L$command";
+                $exit = $self->$method($args);
                 $self->_draw if $self->_can_draw
             }
             catch {
                 warn $_;
             };
+            last if $exit;
         }
         else {
             print "\n";
