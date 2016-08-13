@@ -12,6 +12,7 @@ use File::Temp;
 use Module::Runtime;
 use Path::Class;
 use Term::ReadLine;
+use Try::Tiny;
 
 use Chart::Clicker::SQL;
 
@@ -47,22 +48,40 @@ has rl => (
     },
 );
 
-has chart_options => (
-    is      => 'ro',
-    isa     => 'HashRef',
-    default => sub {
-        {
-            width        => 1000,
-            height       => 600,
-            set_renderer => Chart::Clicker::Renderer::Line->new,
-        }
-    },
+has width => (
+    is      => 'rw',
+    isa     => 'Int',
+    default => 1000,
+);
+
+has height => (
+    is      => 'rw',
+    isa     => 'Int',
+    default => 600,
 );
 
 has last_query => (
     is        => 'rw',
     isa       => 'Str',
     predicate => 'has_last_query',
+);
+
+has domain_axis_class => (
+    is      => 'rw',
+    isa     => 'Str',
+    default => 'Chart::Clicker::Axis',
+);
+
+has range_axis_class => (
+    is      => 'rw',
+    isa     => 'Str',
+    default => 'Chart::Clicker::Axis',
+);
+
+has renderer_class => (
+    is      => 'rw',
+    isa     => 'Str',
+    default => 'Chart::Clicker::Renderer::Line',
 );
 
 sub dsn ($self, $dsn) {
@@ -72,7 +91,20 @@ sub dsn ($self, $dsn) {
 sub select ($self, $query) {
     $query = "select $query";
     $self->last_query($query);
-    $self->_draw;
+}
+
+sub timechart ($self, $args) {
+    $self->domain_axis_class(
+        $args eq 'on'
+            ? "Chart::Clicker::Axis::DateTime"
+            : "Chart::Clicker::Axis"
+    )
+}
+
+for my $renderer (qw(Line StackedLine Bar StackedBar Area StackedArea Point)) {
+    __PACKAGE__->meta->add_method(lc($renderer) => sub ($self, $args) {
+        $self->renderer_class("Chart::Clicker::Renderer::$renderer");
+    })
 }
 
 sub _draw ($self) {
@@ -93,41 +125,59 @@ sub _draw ($self) {
     Browser::Open::open_browser("file://$filename");
 }
 
-sub size ($self, $size) {
-    my ($width, $height) = split ' ', $size;
-    $self->chart_options->{width} = $width;
-    $self->chart_options->{height} = $height;
-}
-
-sub title ($self, $title) {
-    $self->chart_options->{title} = $title;
-}
-
-for my $renderer (qw(Line StackedLine Bar StackedBar Area StackedArea Point)) {
-    __PACKAGE__->meta->add_method(lc($renderer) => sub ($self, $args) {
-        my $renderer_class = "Chart::Clicker::Renderer::$renderer";
-        Module::Runtime::require_module($renderer_class);
-        $self->chart_options->{set_renderer} = $renderer_class->new;
-        $self->_draw;
-    })
-}
-
 sub _configure_chart ($self, $chart) {
-    $chart->get_context('default')->range_axis->tick_division_type("LinearRounded");
-    for my $opt (keys $self->chart_options->%*) {
-        $chart->$opt($self->chart_options->{$opt})
-            if $chart->can($opt);
-    }
+    $chart->get_context('default')->domain_axis($self->_domain_axis);
+    $chart->get_context('default')->range_axis($self->_range_axis);
+    $chart->width($self->width);
+    $chart->height($self->height);
+    $chart->set_renderer($self->_renderer);
+}
+
+sub _domain_axis ($self) {
+    Module::Runtime::require_module($self->domain_axis_class);
+    return $self->domain_axis_class->new(
+        orientation        => 'horizontal',
+        position           => 'bottom',
+        tick_division_type => 'LinearRounded',
+    );
+}
+
+sub _range_axis ($self) {
+    Module::Runtime::require_module($self->range_axis_class);
+    return $self->range_axis_class->new(
+        orientation        => 'vertical',
+        position           => 'left',
+        tick_division_type => 'LinearRounded',
+    )
+}
+
+sub _renderer ($self) {
+    Module::Runtime::require_module($self->renderer_class);
+    return $self->renderer_class->new;
+}
+
+sub _can_draw ($self) {
+    $self->initialized && $self->has_last_query
 }
 
 sub run ($self) {
     while (1) {
-        if (defined(my $input = $self->rl->readline("> "))) {
+        my $prompt = "> ";
+        if ($self->initialized) {
+            $prompt = $self->sql->dsn . $prompt;
+        }
+        if (defined(my $input = $self->rl->readline($prompt))) {
             next unless length($input);
             chomp($input);
             last if $input eq 'exit';
             my ($command, $args) = split(' ', $input, 2);
-            $self->$command($args);
+            try {
+                $self->$command($args);
+                $self->_draw if $self->_can_draw
+            }
+            catch {
+                warn $_;
+            };
         }
         else {
             print "\n";
