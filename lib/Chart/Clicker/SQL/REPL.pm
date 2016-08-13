@@ -103,7 +103,8 @@ sub _draw ($self) {
         return;
     }
     my $chart = $self->sql->render($self->last_query);
-    $self->_configure_chart($chart);
+    my $xaxis = $chart->get_context('default')->domain_axis->label;
+    $self->_configure_chart($chart, $xaxis);
     my ($fh, $filename) = File::Temp::tempfile(SUFFIX => '.png', UNLINK => 1);
     $chart->draw;
     $fh->write($chart->rendered_data);
@@ -111,20 +112,21 @@ sub _draw ($self) {
     Browser::Open::open_browser("file://$filename");
 }
 
-sub _configure_chart ($self, $chart) {
-    $chart->get_context('default')->domain_axis($self->_domain_axis);
+sub _configure_chart ($self, $chart, $xaxis) {
+    $chart->get_context('default')->domain_axis($self->_domain_axis($xaxis));
     $chart->get_context('default')->range_axis($self->_range_axis);
     $chart->width($self->width);
     $chart->height($self->height);
     $chart->set_renderer($self->_renderer);
 }
 
-sub _domain_axis ($self) {
+sub _domain_axis ($self, $label) {
     Module::Runtime::require_module($self->domain_axis_class);
     return $self->domain_axis_class->new(
         orientation        => 'horizontal',
         position           => 'bottom',
         tick_division_type => 'LinearRounded',
+        label              => $label,
     );
 }
 
